@@ -53,6 +53,22 @@ def _decimate_index(n_time, n_out):
     idx = np.round(np.linspace(0, n_time - 1, n_out)).astype(int)
     return np.unique(idx)
 
+
+def _listify(opt, n, kwname):
+    """Broadcast a scalar / str / None option to a list of length n."""
+    if opt is None:
+        return [None] * n
+    if isinstance(opt, str):
+        return [opt] * n
+    opt = list(opt)
+    if len(opt) != n:
+        raise ValueError(
+            f"{kwname} has {len(opt)} entries but there are {n} panels. "
+            f"Give one entry per panel, or a single value for all of them."
+        )
+    return opt
+
+
 class System:
     """A dynamic model plus its parameters and input schedule.
 
@@ -292,14 +308,3 @@ class System:
                 )
             v[:, j] = vals
         return v
-
-    def plot_results(self,n_plots=2,tdata=None,ydata=None,ylabels=None,xlabel=None):
-        fig, axs = plt.subplots(n_plots, 1, sharex=True, figsize=(6,2*n_plots))
-        for ax,yi,label in zip(axs,ydata,ylabels):
-            for yii in yi:
-                ax.plot(tdata,yii)
-            ax.set_ylabel(label)
-            ax.grid(ls='--')
-        axs[-1].set_xlabel('Time')
-        plt.tight_layout()
-        plt.show()
