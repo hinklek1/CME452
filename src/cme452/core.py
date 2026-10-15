@@ -3,6 +3,7 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
+from tqdm.auto import tqdm
 
 # Public names for method=, mapped to what SciPy calls them.
 _SCIPY_METHODS = {
@@ -212,7 +213,8 @@ class System:
     # ==================================================================
     #  INTEGRATE
     # ==================================================================    
-    def run_simulation(self, t_end, IC, dt=0.01, n_out=None, t_start=0.0):
+    def run_simulation(self, t_end, IC, dt=0.01, n_out=None, t_start=0.0,
+                       progress=True, _on_step=None):
         """Integrate with fixed-step RK4 from t_start to t_end.
 
         t_end : float
@@ -221,6 +223,10 @@ class System:
         n_out : None (default) keeps every step the integrator took.
                 An integer DECIMATES to about that many points -- it keeps
                 computed points, it never interpolates. Use it for plots.
+        progress : bool
+                Show a progress bar over the integration steps.
+                Renders as a live widget in Jupyter/Colab, a text bar
+                in the terminal. Set False to silence it.
 
         Sets sys.t, sys.x, sys.v (output grid) and sys.t_full, sys.x_full
         (every computed step). Arrays are (n_states, n_time), so sys.x[0]
@@ -263,9 +269,13 @@ class System:
 
         h = dt_used
         f = self._rates
-        for i in range(n_steps):
+        for i in tqdm(range(n_steps), disable=not progress,
+                      desc=f"integrating ({n_steps:,} steps)",
+                      unit="step", leave=False):
             ti = t[i]
             xi = x[:, i]
+            if _on_step is not None:
+                _on_step(ti, xi)
             k1 = f(ti, xi)
             k2 = f(ti + 0.5 * h, xi + 0.5 * h * k1)
             k3 = f(ti + 0.5 * h, xi + 0.5 * h * k2)
@@ -277,6 +287,7 @@ class System:
 
         # --- output grid: decimate, never interpolate --------------------
         idx = _decimate_index(t.size, n_out)
+        self._out_idx = idx
         self.t = t[idx]
         self.x = x[:, idx]
         self.v = self._values_at(self.t, self.x)
