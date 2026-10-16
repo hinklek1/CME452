@@ -74,8 +74,7 @@ class System:
     """A dynamic model plus its parameters and input schedule.
 
         sys = System(model, params, inputs=[T0, Q])
-        sys.run_simulation(t_end=80, IC=[60.0])                  # rk4
-        sys.run_simulation(t_end=80, IC=[60.0], method='lsoda')  # scipy
+        sys.run_simulation(t_end=80, IC=[60.0])
 
     model  : model(t, x, params, inputs) -> [rates] or [[rates], [values]]
     params : anything -- a dict is recommended, a list works

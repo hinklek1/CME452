@@ -62,7 +62,7 @@ The blocks:
                       delay, the controller sees the reading from `delay`
                       time units ago; before the first delayed sample
                       exists it sees the initial reading (the sensor was
-                      already measuring at t = 0, its output just takes
+                      already measuring at t_start, its output just takes
                       time to arrive). The delay is quantized to the
                       integration step, like the zero-order hold on the
                       output side. (An advanced escape hatch: pass a

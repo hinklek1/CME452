@@ -40,7 +40,7 @@ In Colab:
 !pip install git+https://github.com/hinklek1/CME452
 ```
 
-Dependencies: numpy, scipy, matplotlib, tqdm (all installed automatically).
+Dependencies: numpy, matplotlib, tqdm (all installed automatically).
 
 ## The model convention
 
@@ -165,7 +165,8 @@ u = Kc*e + (Kc/tauI)*I - Kc*tauD*(dy/dt),     dI/dt = e,     e = y_sp - y
 * With limits set, the I term stops accumulating while saturated
   (conditional integration, the standard simple anti-windup).
   `antiwindup=False` switches it off — the fastest way to show windup:
-  same loop, one flag, overshoot 0.07 becomes 0.79.
+  same loop, one flag, and the overshoot gets dramatically worse
+  (in the class setpoint-step example: 0.07 becomes 0.79).
 
 ### Parameter sweeps
 
@@ -185,7 +186,8 @@ for Kc, T in zip([10.0, 25.0, 50.0, 100.0], temps):
 plt.legend(); plt.xlabel("t"); plt.ylabel("T")
 ```
 
-Diverged runs don't raise — they return huge or `NaN` values. Guard with
+Diverged runs usually don't raise — they return huge values, and only
+raise `ModelError` once a derivative goes non-finite. Guard with
 `np.all(np.isfinite(loop.x))` (or a magnitude threshold) before appending.
 
 ## plot_results
@@ -202,9 +204,9 @@ sys.plot_results(*sys.x)                  # 1 panel per state
 Each argument is a 1-D series, a list of 1-D series, or a 2-D array
 (one curve per row). Keywords: `ylabels`, `labels` (one entry per panel;
 each entry a list matching that panel's curve count, or `None`), `xlabel`,
-`title`, `figsize`, `ylims`, `show`. `sys.plot_results(...)` uses the last
-run's `t` automatically; the module-level `plot_results(t, ...)` takes the
-time vector explicitly.
+`title`, `figsize`, `ylims`, `sharex`, `grid`, `show`. `sys.plot_results(...)`
+uses the last run's `t` automatically; the module-level `plot_results(t, ...)`
+takes the time vector explicitly.
 
 ## Tests
 
