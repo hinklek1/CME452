@@ -276,6 +276,12 @@ def one_step(loop, t_op, z):
         setattr(ctrl, attr, val)
 
     u = ctrl.update(t_op, y_s, sp)
+    # apply feedforward the same way the loop does (loop.py ff_move):
+    # the ZOH holds u_PID + Kff*d_j, not the bare controller output
+    if loop._ff is not None:
+        Kff, j = loop._ff
+        d = float(np.asarray(loop.inputs[j + 1](t_op), dtype=float).ravel()[0])
+        u = u + Kff * d
     loop._zoh.set(t_op, u)
 
     # one RK4 step of the plant (valve + process), as the loop does it
