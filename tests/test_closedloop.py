@@ -334,6 +334,67 @@ assert without_aw > 20, without_aw
 print("32 OK  antiwindup flag: pinned %d steps (on) vs %d (off)"
       % (with_aw, without_aw))
 
+# 33. measurement delay: sensor=(Km, delay)
+#     (a) delay=0 is bit-identical to the bare gain (same quantization,
+#         same look-back logic, offset 0)
+#     (b) a nonzero delay changes the closed-loop response: the
+#         controller reacts to the past, so u and x diverge from the
+#         no-delay case.  Use a 2nd-order plant (underdamped) so the
+#         delayed feedback has a visible effect on the transient.
+def osc(t, x, p, i):
+    y, v = x
+    return [v, i[0](t) - 2.0 * v - 4.0 * y]      # wn=2, zeta=0.5
+def run_d(sensor, Kc=1.0, tauI=5.0):
+    loop = ClosedLoop(osc, {}, PID(Kc, tauI), measure=0, y_sp=1.0,
+                      sensor=sensor)
+    loop.run_simulation(t_end=60, IC=[0.0, 0.0], progress=False)
+    return loop
+
+ref = run_d(1.0)
+zero = run_d((1.0, 0.0))
+assert np.max(np.abs(ref.x - zero.x)) == 0.0
+assert np.max(np.abs(ref.u - zero.u)) == 0.0
+d = run_d((1.0, 3.0))
+assert np.max(np.abs(ref.u - d.u)) > 0.1          # controller diverges
+assert np.max(np.abs(ref.x - d.x)) > 0.05         # plant follows
+print("33 OK  delay=0 identical to no delay; delay=3 changes response")
+
+# 34. delay changes the transient shape: with the same gains, the
+#     delayed loop has a different overshoot and a different settling
+#     time.  (Delay adds phase; whether that helps or hurts depends on
+#     the loop -- the point is that it is NOT the same response.)
+def settle(l, sp=1.0, tol=0.1):
+    x = l.x[0]
+    dev = np.abs(x - sp) > tol
+    idx = np.where(dev)[0]
+    if len(idx) == 0:
+        return 0.0
+    return 60.0 * (idx[-1] + 1) / x.size
+
+lag = run_d(1.0)
+slow = run_d((1.0, 3.0))
+assert settle(lag) != settle(slow)
+assert np.max(lag.x[0]) != np.max(slow.x[0])   # different overshoot
+print("34 OK  delay=3: overshoot %.3f -> %.3f, settling %.1f -> %.1f"
+      % (np.max(lag.x[0]), np.max(slow.x[0]),
+         settle(lag), settle(slow)))
+
+# 35. sensor argument validation
+for sensor, frag in [
+    ((1.0,), "(Km, delay)"),
+    ((2.0, 1.0, 3.0), "(Km, delay)"),
+    ((-2.0, 1.0), "positive"),
+    ((2.0, -1.0), "nonnegative"),
+    ((2.0, float("nan")), "nonnegative"),
+    (("a", 1.0), "(Km, delay)"),
+]:
+    try:
+        ClosedLoop(first, {}, Const(), measure=0, sensor=sensor)
+        assert False, sensor
+    except cme452.ModelError as e:
+        assert frag in str(e), (frag, str(e))
+print("35 OK  sensor sequence validation")
+
 print()
-print("ALL TESTS PASSED (32 checks)")
+print("ALL TESTS PASSED (35 checks)")
 raise SystemExit(0)

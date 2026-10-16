@@ -118,7 +118,7 @@ loop = ClosedLoop(
     inputs=T0,                          # disturbances (bare fn, list, or tuple)
     valve=(Kv, 1.0),                    # actuator: (Kv, tauv); None = direct
     valve0=0.5,                         # initial valve position
-    sensor=Km,                          # transducer gain (or a function)
+    sensor=Km,                          # gain, (Km, delay), or a function
 )
 loop.run_simulation(t_end=200, IC=[0.0])
 loop.plot_results([loop.v[0], loop.x[0]], [loop.mv],
@@ -137,7 +137,7 @@ Argument-to-block correspondence:
 | `inputs`      | disturbances  | Enter the process at `inputs[1], inputs[2], ...` — same indices as open-loop. |
 | `valve`       | actuator      | `(Kv, tauv)`: first-order valve `dq/dt = (Kv*u - q)/tauv`. `None` = the controller drives `inputs[0]` directly. |
 | `valve0`      | —             | Initial valve position (an initial condition, not a controller bias). |
-| `sensor`      | transducer (gain) | `Km`: the controller sees `e = Km*(y_sp - y)`, so the setpoint stays in process units. A function of `y` is allowed for noise/nonlinearity — then give `y_sp` in sensor units. |
+| `sensor`      | transducer (gain, delay) | `Km`, or `(Km, delay)` to add a measurement delay: the controller sees the reading from `delay` time units ago (before the first delayed sample, it sees the initial reading). The delay is quantized to the integration step, like the output hold. A function of `y` is allowed for noise/nonlinearity — then give `y_sp` in sensor units (a function cannot carry a delay). |
 
 Results: `loop.x` (process states — **same indexing as the open-loop model**,
 the valve is not in it), `loop.u` (controller output), `loop.mv`
@@ -212,9 +212,9 @@ time vector explicitly.
 PYTHONPATH=src python tests/test_closedloop.py
 ```
 
-32 checks: P/PI behavior, anti-windup on/off, derivative kick, zero-order-hold
+35 checks: P/PI behavior, anti-windup on/off, derivative kick, zero-order-hold
 timing, valve-ODE accuracy against the analytic solution, sensor-gain
-invariance, and error messages.
+invariance, measurement delay, and error messages.
 
 ## Project layout
 
@@ -222,7 +222,7 @@ invariance, and error messages.
 src/cme452/
     core.py        System: RK4 harness, probing, values, decimation, progress
     controller.py  PID
-    loop.py        ClosedLoop: controller scheduling, ZOH, valve, sensor
+    loop.py        ClosedLoop: controller scheduling, ZOH, valve, sensor + delay
     plotting.py    plot_results
 tests/
     test_closedloop.py

@@ -51,16 +51,24 @@ The blocks:
   valve0              the initial valve position (required when valve= is
                       given). This is an initial condition -- where the
                       hardware starts -- not a controller bias.
-  sensor              the TRANSDUCER gain Km (default 1.0). The
-                      controller sees e = Km*(y_sp - y): the sensor reads
-                      Km*y, the setpoint is entered as Km*y_sp, and the
-                      gain cancels in the subtraction. With Kc fixed,
-                      changing Km changes the effective loop gain
-                      Kc*Km -- which is why Kc must be quoted per sensor
-                      unit. (An advanced escape hatch: pass a function
-                      of the measured value, y -> y_sensor, for sensor
-                      noise or nonlinearity; then y_sp must be in sensor
-                      units.)
+  sensor              the TRANSDUCER: the gain Km (default 1.0), or a
+                      two-item sequence (Km, delay) to add a measurement
+                      delay of `delay` time units. The controller sees
+                      e = Km*(y_sp - y): the sensor reads Km*y, the
+                      setpoint is entered as Km*y_sp, and the gain
+                      cancels in the subtraction. With Kc fixed, changing
+                      Km changes the effective loop gain Kc*Km -- which
+                      is why Kc must be quoted per sensor unit. With a
+                      delay, the controller sees the reading from `delay`
+                      time units ago; before the first delayed sample
+                      exists it sees the initial reading (the sensor was
+                      already measuring at t = 0, its output just takes
+                      time to arrive). The delay is quantized to the
+                      integration step, like the zero-order hold on the
+                      output side. (An advanced escape hatch: pass a
+                      function of the measured value, y -> y_sensor, for
+                      sensor noise or nonlinearity; then y_sp must be in
+                      sensor units. A function cannot carry a delay.)
 
 How the loop runs: at every integration step the controller is called
 ONCE on the real state -- never on RK4's fictitious mid-step states --
@@ -90,6 +98,36 @@ def _as_input_list(inputs):
     if callable(inputs):
         return [inputs]
     return list(inputs)
+
+
+class _Delay:
+    """A measurement delay buffer: answers __call__(t) with the reading
+    taken `delay` time units before t.
+
+    Recordings come in on the integration grid (one per step, in time
+    order), so the look-back is a search for the last recording at or
+    before t - delay. Before any such recording exists, the buffer
+    answers y0: the sensor was already measuring at t_start, its output
+    just has not arrived yet. The delay is quantized to a whole number
+    of steps, like the zero-order hold on the output side.
+    """
+    def __init__(self, delay, dt, y0):
+        self._delay = delay
+        self._offset = dt * int(round(delay / dt)) if delay > 0 else 0.0
+        self._y0 = y0
+        self._t = np.zeros(0)
+        self._y = np.zeros(0)
+
+    def add(self, t, y):
+        self._t = np.append(self._t, t)
+        self._y = np.append(self._y, y)
+
+    def __call__(self, t):
+        tq = t - self._offset
+        if self._t.size == 0 or tq <= self._t[0]:
+            return self._y0
+        j = np.searchsorted(self._t, tq, side="right") - 1
+        return self._y[max(j, 0)]
 
 
 class _Hold:
@@ -160,9 +198,32 @@ class ClosedLoop(System):
             )
 
         # ---- sensor (transducer) -------------------------------------
+        self._delay = 0.0
         if callable(sensor):
             self._sensor_fn = sensor
             self._sensor_gain = None
+        elif _is_listlike(sensor):
+            if len(sensor) != 2:
+                raise ModelError(
+                    "a sensor sequence must be (Km, delay): the transducer "
+                    f"gain and a measurement delay. You passed {sensor!r} "
+                    "with " + str(len(sensor)) + " item(s); for a gain "
+                    "alone, pass the number directly (sensor=Km)."
+                )
+            try:
+                Km, d = float(sensor[0]), float(sensor[1])
+            except (TypeError, ValueError):
+                raise ModelError(
+                    "a sensor sequence must be (Km, delay): the transducer "
+                    f"gain and a measurement delay. You passed {sensor!r}."
+                )
+            if not np.isfinite(Km) or Km <= 0.0:
+                raise ModelError(f"sensor gain Km must be a positive number (got {Km}).")
+            if not np.isfinite(d) or d < 0.0:
+                raise ModelError(f"sensor delay must be a nonnegative number (got {d}).")
+            self._delay = d
+            self._sensor_fn = None
+            self._sensor_gain = Km
         else:
             sensor = float(sensor)
             if not np.isfinite(sensor) or sensor <= 0.0:
@@ -201,6 +262,7 @@ class ClosedLoop(System):
         self._sp = y_sp if callable(y_sp) else (lambda t: float(y_sp))
 
         self._zoh = _Hold()
+        self._delay_buf = None     # built at the start of each run
         self._plant = model        # the student's process model, as written
         super().__init__(self._wrapped_model, params,
                          inputs=[self._zoh, *_as_input_list(inputs)])
@@ -286,18 +348,30 @@ class ClosedLoop(System):
         self.controller.reset()
         self._zoh.reset()
 
+        y0 = float(y0[0])
+
+        # Measurement delay: the controller sees the reading taken
+        # `delay` time units ago; before the first delayed sample exists
+        # it sees y0 (the sensor was already measuring at t_start).
+        # Quantized to the (snapped) integration step, like the ZOH.
+        # Snap exactly as System.run_simulation does (its self.dt is only
+        # assigned once that call is below, so replicate the arithmetic).
+        span = float(t_end) - float(t_start)
+        dt_used = span / max(int(round(span / dt)), 1)
+        self._delay_buf = _Delay(self._delay, dt_used, y0)
+
         # Prime the hold with the first control move. System probes the
         # model once at t_start before integrating, and the plant should
         # see a physical input there -- not 0. (The repeated call in
         # on_step at the same t is a no-op for the controller: dt = 0.)
-        y0 = float(y0[0])
         self._zoh.set(t_start, self.controller.update(
-            t_start, *self._transduce(y0, t_start)))
+            t_start, *self._transduce(self._delay_buf(t_start), t_start)))
 
         def on_step(t, x):
             y = float(np.asarray(self.measure(x), dtype=float).ravel()[0])
+            self._delay_buf.add(t, y)
             self._zoh.set(t, self.controller.update(
-                t, *self._transduce(y, t)))
+                t, *self._transduce(self._delay_buf(t), t)))
 
         (self.t, self.x, self.v) = super().run_simulation(
             t_end, IC_full, dt, n_out, t_start, progress=progress,
