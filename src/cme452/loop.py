@@ -168,7 +168,8 @@ class ClosedLoop(System):
     argument is one block of the loop diagram."""
 
     def __init__(self, model, params, controller, measure, y_sp=0.0,
-                 inputs=(), valve=None, valve0=None, sensor=1.0):
+                 inputs=(), valve=None, valve0=None, sensor=1.0,
+                 feedforward=None):
         # ---- valve (actuator) ---------------------------------------
         self._valve = None
         self._valve0 = None
@@ -272,6 +273,51 @@ class ClosedLoop(System):
         super().__init__(self._wrapped_model, params,
                          inputs=[self._zoh, *_as_input_list(inputs)])
 
+        # ---- feedforward ------------------------------------------
+        # A static gain on a chosen disturbance, summed with the
+        # controller output at the actuator:  actuator input =
+        # u_PID + Kff * d_j(t).  The controller's umin/umax clamp limits
+        # the FEEDBACK term only; the sum is what the actuator sees.
+        # (In simulation the disturbance trajectory is known -- in the
+        # real world you would measure it.)
+        self._ff = None
+        if feedforward is not None:
+            n_in = len(self.inputs) - 1
+            if n_in == 0:
+                raise ModelError(
+                    "feedforward needs a disturbance to act on: give "
+                    "inputs= with at least one disturbance function."
+                )
+            if _is_listlike(feedforward) and len(feedforward) != 2:
+                raise ModelError(
+                    "feedforward must be (Kff, j): a gain and the index "
+                    f"of the disturbance in inputs (got {len(feedforward)} "
+                    "values)."
+                )
+            try:
+                Kff, j = float(feedforward[0]), feedforward[1]
+            except (TypeError, IndexError, ValueError):
+                raise ModelError(
+                    "feedforward must be (Kff, j): a gain and the index "
+                    "of the disturbance in inputs."
+                ) from None
+            if not np.isfinite(Kff):
+                raise ModelError(
+                    f"feedforward gain Kff must be finite (got {Kff})."
+                )
+            if isinstance(j, bool) or not isinstance(j, (int, np.integer)):
+                raise ModelError(
+                    "feedforward channel j must be an integer index into "
+                    f"inputs (got {j!r})."
+                )
+            j = int(j)
+            if not (0 <= j < n_in):
+                raise ModelError(
+                    f"feedforward channel j={j} but inputs has {n_in} "
+                    f"disturbance(s); valid indices are 0..{n_in - 1}."
+                )
+            self._ff = (Kff, j)
+
         self.u_full = None
         self.u = None
         self.mv_full = None
@@ -323,8 +369,9 @@ class ClosedLoop(System):
                        progress=True):
         """As System.run_simulation, but IC holds PROCESS initial
         conditions only (the valve starts at valve0). The controller is
-        reset and called once per step; loop.u records its output and
-        loop.mv the manipulated variable."""
+        reset and called once per step; loop.u records its output, loop.mv
+        the manipulated variable (valve position, or the held actuator
+        input -- controller output plus feedforward -- when valve=None)."""
         IC = np.atleast_1d(np.asarray(IC, dtype=float)).ravel()
 
         if self._valve is not None:
@@ -352,6 +399,15 @@ class ClosedLoop(System):
 
         self.controller.reset()
         self._zoh.reset()
+        self._u_pid = []              # raw controller output, per step
+
+        def ff_move(t, u_pid):
+            # the actuator sees the controller output plus the feedforward
+            if self._ff is None:
+                return u_pid
+            Kff, j = self._ff
+            d = float(np.asarray(self.inputs[j + 1](t), dtype=float).ravel()[0])
+            return u_pid + Kff * d
 
         y0 = float(y0[0])
 
@@ -369,14 +425,20 @@ class ClosedLoop(System):
         # model once at t_start before integrating, and the plant should
         # see a physical input there -- not 0. (The repeated call in
         # on_step at the same t is a no-op for the controller: dt = 0.)
-        self._zoh.set(t_start, self.controller.update(
-            t_start, *self._transduce(self._delay_buf(t_start), t_start)))
+        # (No _u_pid append here: on_step runs again at t_start for the
+        # first step and records that move; the repeated controller call
+        # is a no-op, as in the prime's comment above.)
+        u_pid = self.controller.update(
+            t_start, *self._transduce(self._delay_buf(t_start), t_start))
+        self._zoh.set(t_start, ff_move(t_start, u_pid))
 
         def on_step(t, x):
             y = float(np.asarray(self.measure(x), dtype=float).ravel()[0])
             self._delay_buf.add(t, y)
-            self._zoh.set(t, self.controller.update(
-                t, *self._transduce(self._delay_buf(t), t)))
+            u_pid = self.controller.update(
+                t, *self._transduce(self._delay_buf(t), t))
+            self._u_pid.append(u_pid)
+            self._zoh.set(t, ff_move(t, u_pid))
 
         (self.t, self.x, self.v) = super().run_simulation(
             t_end, IC_full, dt, n_out, t_start, progress=progress,
@@ -386,7 +448,8 @@ class ClosedLoop(System):
         # u is piecewise constant. Pad the last point so u_full sits on
         # the same grid as x_full, then decimate with the same indices
         # used for the states -- exact, no interpolation.
-        self.u_full = np.append(self._zoh._u, self._zoh._u[-1])
+        u_arr = np.asarray(self._u_pid, dtype=float)
+        self.u_full = np.append(u_arr, u_arr[-1])
         self.u = self.u_full[self._out_idx]
 
         if self._valve is not None:
@@ -399,5 +462,10 @@ class ClosedLoop(System):
             self.x_full = self.x_full[1:]
             self.x = self.x[1:]
         else:
-            self.mv_full, self.mv = self.u_full, self.u
+            # no valve: the manipulated variable IS the held actuator
+            # input -- the controller output plus feedforward, if any
+            # (identical to u when there is no feedforward).
+            mv_arr = np.asarray(self._zoh._u, dtype=float)
+            mv_full = np.append(mv_arr, mv_arr[-1])
+            self.mv_full, self.mv = mv_full, mv_full[self._out_idx]
         return self.t, self.x, self.v

@@ -395,6 +395,125 @@ for sensor, frag in [
         assert frag in str(e), (frag, str(e))
 print("35 OK  sensor sequence validation")
 
+# ------------------------------------------------------------------
+print("36. perfect feedforward: the disturbance step is invisible")
+
+def ffplant(t, x, p, i):
+    # mv + additive disturbance d, first-order decay
+    return [i[0](t) + i[1](t) - x[0]]
+
+def d_step(t):
+    return 0.0 if t < 5.0 else 0.5
+
+def d_none(t):
+    return 0.0
+
+# no disturbance: the reference trajectory
+ref = ClosedLoop(ffplant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0,
+                 inputs=d_none)
+ref.run_simulation(t_end=20, IC=[0.0], progress=False)
+
+# disturbance step, NO feedforward: the response must visibly differ
+no_ff = ClosedLoop(ffplant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0,
+                   inputs=d_step)
+no_ff.run_simulation(t_end=20, IC=[0.0], progress=False)
+diff_noff = np.max(np.abs(no_ff.x[0][500:] - ref.x[0][500:]))
+assert diff_noff > 0.05, diff_noff
+
+# disturbance step WITH perfect ff (d enters with +1, so Kff = -1):
+# after the crossing step the plant sees exactly what the reference sees
+# (mv = u - 0.5, d = +0.5, net u). The ONE exception is the step that
+# crosses t=5: the ff path is a ZOH too, so it still holds d(4.99) = 0
+# while the disturbance has already jumped at the 4th RK4 stage -- a
+# one-step glitch of h*d/6 that the loop then damps out.
+ff = ClosedLoop(ffplant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0,
+                inputs=d_step, feedforward=(-1.0, 0))
+ff.run_simulation(t_end=20, IC=[0.0], progress=False)
+diff_ff = np.max(np.abs(ff.x[0] - ref.x[0]))
+assert diff_ff < 0.001, diff_ff                       # the glitch (h*d/6)
+diff_tail = np.max(np.abs(ff.x[0][1000:] - ref.x[0][1000:]))
+assert diff_tail < 1e-4, diff_tail                    # damped by the loop
+# and the feedback controller sat still: from t=10 on its output is the
+# reference's, while the actuator input (u + ff) carries the correction --
+# mv drops by 0.5 (Kff*d = -0.5) exactly as the disturbance pushes +0.5
+assert np.max(np.abs(ff.u[1000:] - ref.u[1000:])) < 1e-4
+assert abs(np.mean(ff.mv[1000:]) - (np.mean(ref.mv[1000:]) - 0.5)) < 1e-4
+print(f"36 OK  perfect ff: max|deviation| {diff_ff:.1e} (glitch) vs no-ff {diff_noff:.3f}")
+
+# ------------------------------------------------------------------
+print("37. imperfect ff, P-only: analytic steady-state offset")
+
+# x_ss = (Kc*sp + (Kff+1)*d) / (1 + Kc)   with Kc=1, sp=1, d=0.5
+Kc, Kff, d = 1.0, -0.9, 0.5
+x_ss = (Kc * 1.0 + (Kff + 1.0) * d) / (1.0 + Kc)
+p_only = ClosedLoop(ffplant, {}, PID(Kc), measure=0, y_sp=1.0,
+                    inputs=d_step, feedforward=(Kff, 0))
+p_only.run_simulation(t_end=40, IC=[0.0], progress=False)
+assert abs(p_only.x[0, -1] - x_ss) < 1e-3, (p_only.x[0, -1], x_ss)
+print(f"37 OK  Kff={Kff}: x(40) = {p_only.x[0, -1]:.4f} == analytic {x_ss:.4f}")
+
+# ------------------------------------------------------------------
+print("38. ff acts on the CHOSEN channel only")
+
+def two_dist(t, x, p, i):
+    return [i[0](t) + i[1](t) + 3.0 * i[2](t) - x[0]]
+
+# ff on channel 1 (the 3*d2 term) with the right gain
+okch = ClosedLoop(two_dist, {}, PID(1.0, 4.0), measure=0, y_sp=1.0,
+                  inputs=(d_none, d_step), feedforward=(-3.0, 1))
+okch.run_simulation(t_end=20, IC=[0.0], progress=False)
+# same one-step crossing glitch as test 36 (h*3*d/6 = 0.0025), then flat
+assert np.max(np.abs(okch.x[0] - ref.x[0])) < 0.01
+assert np.max(np.abs(okch.x[0][1000:] - ref.x[0][1000:])) < 1e-4
+
+# the same ff gain on channel 0 (the d1 term) does NOT cancel d2
+badch = ClosedLoop(two_dist, {}, PID(1.0, 4.0), measure=0, y_sp=1.0,
+                   inputs=(d_none, d_step), feedforward=(-1.0, 0))
+badch.run_simulation(t_end=20, IC=[0.0], progress=False)
+assert np.max(np.abs(badch.x[0][500:] - ref.x[0][500:])) > 0.05
+print("38 OK  ff cancels its channel, leaves the other alone")
+
+# ------------------------------------------------------------------
+print("39. ff is added AFTER the controller's clamp")
+
+saturated = ClosedLoop(
+    ffplant, {}, PID(50.0, umin=0.0, umax=1.0), measure=0, y_sp=10.0,
+    inputs=d_step, feedforward=(4.0, 0))
+saturated.run_simulation(t_end=8, IC=[0.0], progress=False)
+assert np.max(saturated.u) <= 1.0 + 1e-12          # PID clamped at 1
+assert abs(np.max(saturated.mv) - 3.0) < 1e-9      # actuator sees 1 + 4*0.5
+print("39 OK  u clamped at 1.0, actuator input (mv) reaches 3.0")
+
+# ------------------------------------------------------------------
+print("40. feedforward argument validation")
+
+for ff, frag in [
+    (5.0, "(Kff, j)"),                # bare gain, no channel
+    ((1.0,), "(Kff, j)"),             # missing channel
+    ((1.0, 0.5, 2.0), "(Kff, j)"),    # too long
+    ((float("nan"), 0), "finite"),
+    ((1.0, 3), "valid indices"),      # only one disturbance
+    ((1.0, "a"), "integer"),
+    ((1.0, True), "integer"),
+]:
+    try:
+        ClosedLoop(ffplant, {}, PID(1.0), measure=0, y_sp=1.0,
+                   inputs=d_step, feedforward=ff)
+        assert False, ff
+    except cme452.ModelError as e:
+        assert frag in str(e), (frag, str(e))
+try:                                              # no disturbances at all
+    ClosedLoop(ffplant, {}, PID(1.0), measure=0, y_sp=1.0,
+               feedforward=(1.0, 0))
+    assert False
+except cme452.ModelError as e:
+    assert "inputs=" in str(e), str(e)
+# a NEGATIVE gain is legal (the sign is the physics of the disturbance)
+neg = ClosedLoop(ffplant, {}, PID(1.0), measure=0, y_sp=1.0,
+                 inputs=d_step, feedforward=(-1.0, 0))
+neg.run_simulation(t_end=1.0, IC=[0.0], progress=False)
+print("40 OK  feedforward validation")
+
 print()
-print("ALL TESTS PASSED (35 checks)")
+print("ALL TESTS PASSED (40 checks)")
 raise SystemExit(0)

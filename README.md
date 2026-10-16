@@ -139,10 +139,12 @@ Argument-to-block correspondence:
 | `valve`       | actuator      | `(Kv, tauv)`: first-order valve `dq/dt = (Kv*u - q)/tauv`. `None` = the controller drives `inputs[0]` directly. |
 | `valve0`      | —             | Initial valve position (an initial condition, not a controller bias). |
 | `sensor`      | transducer (gain, delay) | `Km`, or `(Km, delay)` to add a measurement delay: the controller sees the reading from `delay` time units ago (before the first delayed sample, it sees the initial reading). The delay is quantized to the integration step, like the output hold. A function of `y` is allowed for noise/nonlinearity — then give `y_sp` in sensor units (a function cannot carry a delay). |
+| `feedforward` | ff path                 | `(Kff, j)`: a static gain `Kff` on disturbance `inputs[j]`, summed into the controller output at the actuator: `actuator input = clamp(u_PID) + Kff·d_j(t)`. `None` = pure feedback. |
 
 Results: `loop.x` (process states — **same indexing as the open-loop model**,
 the valve is not in it), `loop.u` (controller output), `loop.mv`
-(manipulated variable: valve position when `valve=` is given, else `u`),
+(manipulated variable: valve position when `valve=` is given, else the held
+actuator input — controller output plus feedforward, if any),
 plus `loop.v` and the `_full` variants. The controller is called once per
 step on the real state and its output is held (zero-order hold), so the I
 term accumulates correctly and mid-step evaluations see the move that was
@@ -190,6 +192,53 @@ plt.legend(); plt.xlabel("t"); plt.ylabel("T")
 Diverged runs usually don't raise — they return huge values, and only
 raise `ModelError` once a derivative goes non-finite. Guard with
 `np.all(np.isfinite(loop.x))` (or a magnitude threshold) before appending.
+
+### Feedforward
+
+Feedback corrects *after* the disturbance reaches the measured output.
+Feedforward acts on the disturbance itself — a gain on a chosen input,
+summed into the controller output at the actuator:
+
+```
+e --->[ PID ]---+---> actuator ---> process ---> y ---> sensor
+                +
+ d_j(t) --->[ Kff ]
+```
+
+```python
+loop = ClosedLoop(model, params, PID(Kc, tauI), measure=0, y_sp=Tsp,
+                  inputs=(T0, P0),            # two disturbances
+                  feedforward=(-2.0, 0))      # Kff = -2 on inputs[0]
+```
+
+* `j` indexes `inputs` (0 = the first disturbance); the sign of `Kff` is
+  physics — if a +1 step in `d_j` pushes `y` up, `Kff` is negative.
+* The `umin`/`umax` clamp limits the **feedback term only**; the actuator
+  sees `clamp(u_PID) + Kff·d_j(t)`. That is why `loop.u` (the PID output)
+  and `loop.mv` (the actuator input, when `valve=None`) differ when ff is
+  on.
+* In simulation the disturbance trajectory is *known* — in the real world
+  you would measure it, i.e., ff needs its own sensor.
+* A perfect gain makes the feedback controller **sit still**: the PID
+  output never moves while the actuator input carries the whole
+  correction. One catch: the ff path is a zero-order hold like the rest of
+the digital loop — it samples `d_j` at the control rate, so a step that
+lands mid-step is compensated from the next step (a one-step blip of
+`dt·Δ/6` that the loop damps out).
+
+```python
+def ffplant(t, x, p, inputs):      # mv + disturbance, first-order decay
+    return [inputs[0](t) + inputs[1](t) - x[0]]
+
+def d_step(t): return 0.0 if t < 5 else 0.5    # enters the plant with +1
+no_ff = ClosedLoop(ffplant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0,
+                   inputs=d_step)
+ff    = ClosedLoop(ffplant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0,
+                   inputs=d_step, feedforward=(-1.0, 0))   # cancels d_step
+no_ff.run_simulation(t_end=20, IC=[0.0], progress=False)
+ff.run_simulation(t_end=20, IC=[0.0], progress=False)
+# ff.x tracks the undisturbed response; no_ff.x visibly dips at t = 5
+```
 
 ## Stability analysis (eigenvalues)
 
@@ -257,7 +306,7 @@ takes the time vector explicitly.
 ## Tests
 
 ```bash
-PYTHONPATH=src python tests/test_closedloop.py    # 35 checks
+PYTHONPATH=src python tests/test_closedloop.py    # 40 checks
 PYTHONPATH=src python tests/test_stability.py     # 9 checks
 ```
 
