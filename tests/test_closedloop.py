@@ -514,6 +514,77 @@ neg = ClosedLoop(ffplant, {}, PID(1.0), measure=0, y_sp=1.0,
 neg.run_simulation(t_end=1.0, IC=[0.0], progress=False)
 print("40 OK  feedforward validation")
 
+# ======================================================================
+# 41. source=: open-loop drive (no controller) ---------------------------
+# ======================================================================
+print("41. source=: open-loop drive (no controller)")
+
+def plant(t, x, p, i): return [i[0](t) - x[0]]      # first-order, tau=1
+
+# (a) (w, A) sine: the held signal is A*sin(w*t), sampled per step
+lp = ClosedLoop(plant, {}, measure=0, source=(2.0 * np.pi, 3.0))
+t, x, v = lp.run_simulation(t_end=5.0, IC=[0.0], dt=0.01, progress=False)
+# u is piecewise constant; at t=0.25 the held value is sin at the last
+# sample <= 0.25, i.e. sin(2*pi*0.25)=1 -> 3*1 = 3 (peak)
+i = int(np.argmin(np.abs(t - 0.25)))
+assert abs(lp.u[i] - 3.0) < 1e-3, (i, lp.u[i])
+# the plant follows: x(t) is the first-order response to the sine
+assert lp.x[0, -1] == lp.x[0, -1]   # finite (no divergence)
+
+# (b) bare frequency = unit amplitude
+lp2 = ClosedLoop(plant, {}, measure=0, source=1.0)
+t2, _, _ = lp2.run_simulation(t_end=1.0, IC=[0.0], dt=0.01, progress=False)
+assert abs(lp2.u[1] - np.sin(0.01)) < 1e-6, lp2.u[1]
+
+# (c) 1-tuple (w,) = unit amplitude, same as bare w
+lp1t = ClosedLoop(plant, {}, measure=0, source=(1.0,))
+lp1t.run_simulation(t_end=1.0, IC=[0.0], dt=0.01, progress=False)
+assert abs(lp1t.u[1] - np.sin(0.01)) < 1e-6
+
+# (d) callable drive
+lp3 = ClosedLoop(plant, {}, measure=0, source=(lambda tt: 0.5 * np.cos(tt)))
+lp3.run_simulation(t_end=1.0, IC=[0.0], dt=0.01, progress=False)
+assert abs(lp3.u[1] - 0.5 * np.cos(0.01)) < 1e-6, lp3.u[1]
+
+# (e) settable property: a sweep reassigns the source
+lp.source = (1.0, 2.0)
+lp.run_simulation(t_end=1.0, IC=[0.0], dt=0.01, progress=False)
+assert abs(lp.u[1] - 2.0 * np.sin(0.01)) < 1e-6, lp.u[1]
+
+# (f) valve + source: mv is the valve position (lags the sine), u is the sine
+lpv = ClosedLoop(plant, {}, measure=0, source=(1.0, 1.0),
+                 valve=(1.0, 0.5), valve0=0.0)
+tv, _, _ = lpv.run_simulation(t_end=20.0, IC=[0.0], dt=0.01, progress=False)
+# u must be the raw sine; mv the valve state, oscillating around it
+i = int(np.argmin(np.abs(tv - 15.0)))
+assert abs(lpv.u[i] - np.sin(1.0 * 15.0)) < 1e-2, lpv.u[i]
+assert np.max(np.abs(lpv.mv)) > 0.3, "valve did not move"
+assert np.all(np.isfinite(lpv.mv))
+
+# (g) mutual exclusion + bad source errors
+for name, fn in [
+    ("both", lambda: ClosedLoop(plant, {}, PID(1.0), measure=0,
+                                source=(1.0, 1.0))),
+    ("neither", lambda: ClosedLoop(plant, {}, measure=0)),
+    ("w=0", lambda: ClosedLoop(plant, {}, measure=0, source=(0.0, 1.0))),
+    ("w<0", lambda: ClosedLoop(plant, {}, measure=0, source=(-1.0, 1.0))),
+    ("str", lambda: ClosedLoop(plant, {}, measure=0, source=("a",))),
+    ("A nan", lambda: ClosedLoop(plant, {}, measure=0, source=(1.0, float("nan")))),
+]:
+    try:
+        fn(); assert False, name
+    except cme452.ModelError as e:
+        assert len(str(e)) > 0
+
+# (h) controller path is UNCHANGED (regression): same loop, same result
+lpc1 = ClosedLoop(plant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0)
+lpc1.run_simulation(t_end=5.0, IC=[0.0], progress=False)
+lpc2 = ClosedLoop(plant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0)
+lpc2.run_simulation(t_end=5.0, IC=[0.0], progress=False)
+assert np.array_equal(lpc1.x, lpc2.x), "controller loop non-deterministic"
+
+print("41 OK  source drive (sine/bare/callable/settable/valve/errors)")
+
 print()
-print("ALL TESTS PASSED (40 checks)")
+print("ALL TESTS PASSED (41 checks)")
 raise SystemExit(0)

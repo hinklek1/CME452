@@ -26,7 +26,18 @@ The blocks:
                       is inputs[0](t). IC holds PROCESS initial
                       conditions only.
   controller          an object with update(t, y, y_sp) -> u and reset(),
-                      e.g. PID. Its gains live in the object.
+                      e.g. PID. Its gains live in the object. Exactly one
+                      of controller= and source= is required.
+  source              instead of a controller, PRESCRIBE the manipulated
+                      variable directly: an open-loop test signal. A tuple
+                      (w, A) means u(t) = A*sin(w*t) (w the angular
+                      frequency, A the amplitude; A defaults to 1.0), or a
+                      function t -> u for an arbitrary drive. With source=
+                      there is no feedback: y_sp is ignored and the loop is
+                      the open chain  source -> valve -> process -> y ->
+                      sensor. This is how a frequency scan (cme452.frequency)
+                      drives the loop. The source is a settable property, so
+                      a sweep can reassign loop.source per frequency.
   measure             which process state the sensor reads: a state index
                       (measure=0 reads the first process state) or a
                       function of the process state, x -> y, e.g. for a
@@ -74,13 +85,16 @@ How the loop runs: at every integration step the controller is called
 ONCE on the real state -- never on RK4's fictitious mid-step states --
 and its output is held by a zero-order hold until the next step. That is
 the physical picture of a digital control loop, and it is what keeps the
-I-term accumulated correctly.
+I-term accumulated correctly. With source= there is no controller: the
+prescribed signal is sampled at each step and held by the same ZOH, so the
+valve and the disturbance timing are identical to the closed loop.
 
 Results after run_simulation: everything System has (t, x, v, t_full,
 x_full) plus
 
-    loop.u      controller output (actuator signal), on the output grid
-    loop.u_full controller output at every integration step
+    loop.u      controller output (actuator signal; with source=, the
+                prescribed signal), on the output grid
+    loop.u_full the same, at every integration step
     loop.mv     the manipulated variable: the valve position when
                 valve= is given, identical to u otherwise
 
@@ -167,9 +181,9 @@ class ClosedLoop(System):
     module docstring for the full argument-by-argument description; each
     argument is one block of the loop diagram."""
 
-    def __init__(self, model, params, controller, measure, y_sp=0.0,
-                 inputs=(), valve=None, valve0=None, sensor=1.0,
-                 feedforward=None):
+    def __init__(self, model, params, controller=None, measure=0,
+                 y_sp=0.0, inputs=(), valve=None, valve0=None, sensor=1.0,
+                 feedforward=None, source=None):
         # ---- valve (actuator) ---------------------------------------
         self._valve = None
         self._valve0 = None
@@ -232,13 +246,30 @@ class ClosedLoop(System):
             self._sensor_fn = None
             self._sensor_gain = sensor
 
-        # ---- controller ----------------------------------------------
-        if not (hasattr(controller, "update") and hasattr(controller, "reset")):
+        # ---- controller OR source (the u block) ----------------------
+        # Exactly one: a controller closes the loop; a source prescribes
+        # the manipulated variable (an open-loop test signal).
+        if (controller is None) == (source is None):
             raise ModelError(
-                "controller must have update(t, y, y_sp) and reset() "
-                f"methods (e.g. a PID). You passed a {type(controller).__name__}."
+                "give exactly one of controller= or source=: controller= "
+                "closes the feedback loop, source= prescribes the "
+                "manipulated variable directly (open-loop test signal). "
+                "You passed "
+                + ("both." if controller is not None else "neither.")
             )
-        self.controller = controller
+        self.controller = None
+        self._source = None
+        if controller is not None:
+            if not (hasattr(controller, "update")
+                    and hasattr(controller, "reset")):
+                raise ModelError(
+                    "controller must have update(t, y, y_sp) and reset() "
+                    "methods (e.g. a PID). You passed a "
+                    f"{type(controller).__name__}."
+                )
+            self.controller = controller
+        else:
+            self._set_source(source)
 
         # ---- measure (which process state is sensed) ------------------
         self._measure_idx = None
@@ -349,6 +380,46 @@ class ClosedLoop(System):
             out = [out]
         return [dqv] + list(out)
 
+    def _set_source(self, source):
+        """Validate and store an open-loop source (t -> u) for the
+        manipulated variable. A (w, A) tuple becomes A*sin(w*t); A
+        defaults to 1.0. A callable is used as-is."""
+        if callable(source):
+            self._source = (lambda t, f=source: float(f(t)))
+            return
+        try:
+            if _is_listlike(source):
+                if len(source) == 1:
+                    w, A = float(source[0]), 1.0
+                elif len(source) == 2:
+                    w, A = float(source[0]), float(source[1])
+                else:
+                    raise ValueError
+            else:
+                # a bare number is a frequency with unit amplitude
+                w, A = float(source), 1.0
+        except (TypeError, ValueError, IndexError):
+            raise ModelError(
+                "source must be a (w, A) tuple for A*sin(w*t), a bare "
+                "frequency w (unit amplitude), or a function t -> u. "
+                f"You passed {source!r}."
+            ) from None
+        if not np.isfinite(w) or w <= 0.0:
+            raise ModelError(f"source frequency w must be positive (got {w}).")
+        if not np.isfinite(A):
+            raise ModelError(f"source amplitude A must be finite (got {A}).")
+        self._source = (lambda t, w=w, A=A: A * np.sin(w * t))
+
+    @property
+    def source(self):
+        """The open-loop source (t -> u), or None when controller= is set.
+        Settable: a frequency sweep reassigns loop.source per frequency."""
+        return self._source
+
+    @source.setter
+    def source(self, value):
+        self._set_source(value)
+
     def _transduce(self, y, t):
         """Apply the sensor: return (sensor reading, setpoint) in the
         units the controller works in. For a gain Km both are scaled:
@@ -397,9 +468,11 @@ class ClosedLoop(System):
                 f"{y0.size} values: {y0.tolist()}"
             )
 
-        self.controller.reset()
         self._zoh.reset()
-        self._u_pid = []              # raw controller output, per step
+        self._u_pid = []              # actuator signal (u), per step
+        using_source = self._source is not None
+        if not using_source:
+            self.controller.reset()
 
         def ff_move(t, u_pid):
             # the actuator sees the controller output plus the feedforward
@@ -415,28 +488,35 @@ class ClosedLoop(System):
         # `delay` time units ago; before the first delayed sample exists
         # it sees y0 (the sensor was already measuring at t_start).
         # Quantized to the (snapped) integration step, like the ZOH.
+        # With a source there is no controller, so the delay buffer is
+        # unused -- but we still build it so the code path is uniform.
         # Snap exactly as System.run_simulation does (its self.dt is only
         # assigned once that call is below, so replicate the arithmetic).
         span = float(t_end) - float(t_start)
         dt_used = span / max(int(round(span / dt)), 1)
         self._delay_buf = _Delay(self._delay, dt_used, y0)
 
-        # Prime the hold with the first control move. System probes the
-        # model once at t_start before integrating, and the plant should
-        # see a physical input there -- not 0. (The repeated call in
-        # on_step at the same t is a no-op for the controller: dt = 0.)
-        # (No _u_pid append here: on_step runs again at t_start for the
-        # first step and records that move; the repeated controller call
-        # is a no-op, as in the prime's comment above.)
-        u_pid = self.controller.update(
-            t_start, *self._transduce(self._delay_buf(t_start), t_start))
-        self._zoh.set(t_start, ff_move(t_start, u_pid))
+        # Prime the hold with the first move. System probes the model once
+        # at t_start before integrating, and the plant should see a
+        # physical input there -- not 0.
+        if using_source:
+            u0 = self._source(t_start)
+        else:
+            # The repeated call in on_step at the same t is a no-op for the
+            # controller: dt = 0. (No _u_pid append here: on_step runs
+            # again at t_start for the first step and records that move.)
+            u0 = self.controller.update(
+                t_start, *self._transduce(self._delay_buf(t_start), t_start))
+        self._zoh.set(t_start, ff_move(t_start, u0))
 
         def on_step(t, x):
-            y = float(np.asarray(self.measure(x), dtype=float).ravel()[0])
-            self._delay_buf.add(t, y)
-            u_pid = self.controller.update(
-                t, *self._transduce(self._delay_buf(t), t))
+            if using_source:
+                u_pid = self._source(t)
+            else:
+                y = float(np.asarray(self.measure(x), dtype=float).ravel()[0])
+                self._delay_buf.add(t, y)
+                u_pid = self.controller.update(
+                    t, *self._transduce(self._delay_buf(t), t))
             self._u_pid.append(u_pid)
             self._zoh.set(t, ff_move(t, u_pid))
 

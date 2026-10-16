@@ -240,6 +240,32 @@ ff.run_simulation(t_end=20, IC=[0.0], progress=False)
 # ff.x tracks the undisturbed response; no_ff.x visibly dips at t = 5
 ```
 
+### Open-loop drive (`source=`)
+
+Instead of a controller, `source=` **prescribes the manipulated variable
+** — an open-loop test signal through the same valve/sensor/measure
+bookkeeping as a closed loop. Exactly one of `controller=` and `source=`
+is required.
+
+```python
+loop = ClosedLoop(model, params, measure=0, source=(w, A))
+#   source=(w, A)   ->  u(t) = A·sin(w·t)     (A defaults to 1.0)
+#   source=w        ->  unit-amplitude sine at frequency w
+#   source=fn       ->  u(t) = fn(t)           (any prescribed drive)
+loop.run_simulation(t_end=10, IC=[x0])
+```
+
+`loop.u` is the prescribed signal; `loop.mv` is the valve position when
+`valve=` is given. `source` is a settable property, so a frequency sweep
+reassigns `loop.source = (w, A)` per point — which is exactly what
+`cme452.frequency` does. `y_sp` is ignored in source mode.
+
+```python
+plant = ClosedLoop(ffplant, {}, measure=0, source=(2*np.pi, 1.0))
+plant.run_simulation(t_end=5, IC=[0.0])
+# sine in, first-order lag out — the raw "sine test" you would run by hand
+```
+
 ## Stability analysis (eigenvalues)
 
 Two objects, matching the two time domains:
@@ -306,16 +332,17 @@ takes the time vector explicitly.
 ## Tests
 
 ```bash
-PYTHONPATH=src python tests/test_closedloop.py    # 40 checks
+PYTHONPATH=src python tests/test_closedloop.py    # 41 checks
 PYTHONPATH=src python tests/test_stability.py     # 9 checks
 ```
 
 The first: P/PI behavior, anti-windup on/off, derivative kick,
 zero-order-hold timing, valve-ODE accuracy against the analytic solution,
-sensor-gain invariance, measurement delay, and error messages.  The
-second: Jacobians against hand-computed eigenvalues, predicted vs
-simulated ringing period, the one-step map against its exact ZOH
-discretization, and that linearizing disturbs nothing.
+sensor-gain invariance, measurement delay, feedforward, and the open-loop
+`source=` drive (the manipulated variable prescribed instead of a
+controller).  The second: Jacobians against hand-computed eigenvalues,
+predicted vs simulated ringing period, the one-step map against its exact
+ZOH discretization, and that linearizing disturbs nothing.
 
 ## Project layout
 
