@@ -302,8 +302,14 @@ gm, pm, w_gc, w_pc = frequency.margins(gain, phase, w)
   `stability.jacobian`): the fit removes the DC level, so it measures the
   AC response about that point.
 * `bode` returns `(omegas, gain, phase, fig)`; `response` returns the three
-  arrays. `dt` keeps the usual `0.01` default — keep `w·dt` well below ~0.5
-  at the top of your grid, or the ZOH-sampled sine is under-resolved.
+  arrays.
+* **It's fast by default.** `dt` defaults to `None` ("auto"): each frequency
+  uses the largest safe step, `min(dt_max, 0.2/w)`, so low frequencies run
+  with a coarse (fast) step and high frequencies stay resolved. A 100-point
+  scan of a 1st-order + valve chain takes ~8 s; 40 points take ~3 s. Pass
+  `dt=0.01` to force a fine, slower step at every `w`, or `settle_time=6.0`
+  to settle by a fixed process duration (≈6× the slowest time constant)
+  instead of `settle_periods` sine periods.
 
 ## Stability analysis (eigenvalues)
 
@@ -373,7 +379,7 @@ takes the time vector explicitly.
 ```bash
 PYTHONPATH=src python tests/test_closedloop.py    # 41 checks
 PYTHONPATH=src python tests/test_stability.py     # 9 checks
-PYTHONPATH=src python tests/test_frequency.py     # 6 checks
+PYTHONPATH=src python tests/test_frequency.py     # 7 checks
 ```
 
 The first: P/PI behavior, anti-windup on/off, derivative kick,
@@ -385,7 +391,8 @@ predicted vs simulated ringing period, the one-step map against its exact
 ZOH discretization, and that linearizing disturbs nothing.  The third:
 the sine-test Bode response against analytic 1st- and 2nd-order transfer
 functions, the valve+sensor chain, the 2nd-order resonance peak,
-margin crossings on synthetic curves, and headless `bode` rendering.
+margin crossings on synthetic curves, headless `bode` rendering, and the
+auto-`dt` per-frequency step (faster at low w, still accurate).
 
 ## Project layout
 

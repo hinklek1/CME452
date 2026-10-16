@@ -82,19 +82,41 @@ def _validate_source_loop(plant):
     return True
 
 
-def _fit_one(plant, IC_ss, w, settle_periods, fit_periods, dt):
+def _fit_one(plant, IC_ss, w, settle_periods, fit_periods, dt,
+             settle_time=None, dt_max=0.05):
     """Run one frequency and return (gain, phase) for that w.
 
-    Both windows are integer periods so the run length and the fit window
-    line up exactly and the fit covers whole periods (no half-period
-    leakage into the sin/cos correlation).
+    The fit window is `fit_periods` whole periods (whole periods => no
+    half-period leakage into the sin/cos correlation). The settle window
+    is `settle_time` (a fixed TIME duration, default ~6 x the slowest time
+    constant) if given, else `settle_periods` periods. Settling by a fixed
+    process time instead of by sine periods avoids running 10x longer than
+    needed for a fast process at low w.
+
+    The integration step is min(dt, dt_max, 0.2/w) so the sine is never
+    under-resolved (w*dt <= 0.2) and low frequencies use a coarser, faster
+    step. dt_max caps the step so it never outruns the process dynamics.
     """
-    settle = max(1, int(round(settle_periods)))
     fit = max(1, int(round(fit_periods)))
-    # t_end in TIME units: (settle + fit) full periods at frequency w
-    t_end = (settle + fit) * (2.0 * np.pi / w)
+    # per-frequency step: the LARGEST step that (a) still resolves the sine
+    # (w*h <= 0.2) and (b) still resolves the process dynamics (h <= dt_max).
+    # This makes low frequencies fast (coarse step) and high frequencies
+    # accurate (fine step) automatically. If the caller passed an explicit
+    # dt, it is a further ceiling (a small dt forces a finer, slower step);
+    # dt=None (the default) means "auto" -- use only dt_max and 0.2/w.
+    caps = [float(dt_max), 0.2 / w]
+    if dt is not None:
+        caps.append(float(dt))
+    h = min(caps)
+    h = max(h, 1e-6)                      # guard against w -> inf
+    # settle duration in TIME units
+    if settle_time is None:
+        settle_time = max(1, int(round(settle_periods))) * (2.0 * np.pi / w)
+    settle_time = float(settle_time)
+    fit_time = fit * (2.0 * np.pi / w)
+    t_end = settle_time + fit_time
     # n_fit in POINTS for the fit window: fit periods worth of samples
-    n_fit = int(round(fit * (2.0 * np.pi / w) / dt))
+    n_fit = max(2, int(round(fit_time / h)))
     # re-point the source at this frequency (unit amplitude internally;
     # the fit divides it out, so A does not change the answer)
     plant.source = (w, 1.0)
@@ -102,7 +124,7 @@ def _fit_one(plant, IC_ss, w, settle_periods, fit_periods, dt):
     # output with sin/cos on a dense grid, so the output must not be
     # decimated (decimating to ~n points would alias the w-sine).
     t, x, v = plant.run_simulation(
-        t_end=t_end, IC=IC_ss, dt=dt, n_out=None, progress=False
+        t_end=t_end, IC=IC_ss, dt=h, n_out=None, progress=False
     )
     # measured output on the output grid, in SENSOR units (the chain the
     # controller closes on: process -> valve -> sensor). x_full is every
@@ -149,7 +171,7 @@ def _fit_one(plant, IC_ss, w, settle_periods, fit_periods, dt):
 # ---------------------------------------------------------------------
 
 def response(plant, IC_ss, omegas, settle_periods=2.0, fit_periods=3.0,
-             dt=0.01):
+             dt=None, settle_time=None, dt_max=0.05):
     """Simulate a sine test at each frequency and return the frequency
     response of the open chain (source -> valve -> process -> sensor).
 
@@ -167,12 +189,23 @@ def response(plant, IC_ss, omegas, settle_periods=2.0, fit_periods=3.0,
         ~15-20 points makes a good Bode picture.
     settle_periods : float, optional
         How many periods to run before the fit so the transient from
-        IC_ss decays. Default 2.
+        IC_ss decays. Default 2. Ignored when settle_time is given.
     fit_periods : float, optional
         How many periods to correlate over. Default 3.
-    dt : float, optional
-        Integration step. Default 0.01. Smaller is more accurate but
-        slower -- every w is a full simulation.
+    dt : float or None, optional
+        Integration-step ceiling. Default None ("auto"): each frequency uses
+        the largest safe step, min(dt_max, 0.2/w), so low frequencies are
+        fast and high frequencies stay resolved. Pass a small dt (e.g.
+        0.01) to force a finer, slower, more accurate step at every w.
+    settle_time : float or None, optional
+        If given, the settle window is this many TIME units (a fixed
+        duration), not `settle_periods` periods. Set it to ~5-10 x the
+        slowest process time constant to settle the transient without
+        over-running. Default None -> use `settle_periods`.
+    dt_max : float, optional
+        Upper bound on the per-frequency integration step (default 0.05).
+        Keeps the step fine enough to resolve fast transients even at low
+        w, while still letting low frequencies use a coarser, faster step.
 
     Returns
     -------
@@ -191,17 +224,20 @@ def response(plant, IC_ss, omegas, settle_periods=2.0, fit_periods=3.0,
         raise ModelError(
             "settle_periods and fit_periods must be positive."
         )
+    if settle_time is not None and settle_time <= 0:
+        raise ModelError("settle_time must be positive when given.")
     gain = np.empty_like(omegas)
     phase = np.empty_like(omegas)
     for k, w in enumerate(omegas):
         gain[k], phase[k] = _fit_one(
-            plant, IC_ss, float(w), settle_periods, fit_periods, dt
+            plant, IC_ss, float(w), settle_periods, fit_periods, dt,
+            settle_time=settle_time, dt_max=dt_max,
         )
     return omegas, gain, phase
 
 
 def bode(plant, IC_ss, omegas, settle_periods=2.0, fit_periods=3.0,
-         dt=0.01, ax=None, **kwargs):
+         dt=None, settle_time=None, dt_max=0.05, ax=None, **kwargs):
     """Simulate the sine test and draw the two-panel Bode plot
     (gain in dB, phase in degrees) on a log-frequency axis.
 
@@ -212,6 +248,7 @@ def bode(plant, IC_ss, omegas, settle_periods=2.0, fit_periods=3.0,
     omegas, gain, phase = response(
         plant, IC_ss, omegas,
         settle_periods=settle_periods, fit_periods=fit_periods, dt=dt,
+        settle_time=settle_time, dt_max=dt_max,
     )
     if ax is None:
         fig, ax = plt.subplots(

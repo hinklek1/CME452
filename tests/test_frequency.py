@@ -150,9 +150,39 @@ check("bode gain/phase match response()",
 plt.close(fig)
 
 # ======================================================================
-# 6. source-mode validation: a controller loop is rejected cleanly
+# 6. auto-dt: the scan picks a per-frequency step (fast at low w, fine at
+#    high w) and stays accurate; an explicit dt= is a ceiling, not a floor
 # ======================================================================
-print("6. a controller loop is rejected")
+print("6. auto-dt picks a safe per-frequency step")
+p6 = make_plant(valve=(1.0, 0.5), valve0=0.0, sensor=1.0)
+w6 = np.logspace(-1, 1, 20)
+# auto-dt (dt=None) must match an explicit fine dt (dt=0.01) to within the
+# expected tolerance -- same math, just different step sizes
+_, ga, pa = frequency.response(p6, [1.0], w6, dt=0.01,
+                               settle_periods=3, fit_periods=5)
+_, g_auto, p_auto = frequency.response(p6, [1.0], w6, dt=None,
+                                       settle_periods=3, fit_periods=5)
+rel = float(np.max(np.abs(g_auto - ga) / ga))
+absph = float(np.max(np.abs(p_auto - pa)))
+check("auto-dt matches fine-dt",
+      rel < 0.05 and absph < 0.20,
+      f"max rel gain diff {rel:.1e}, max phase diff {np.degrees(absph):.2f} deg")
+# and auto-dt must actually be FASTER than forcing dt=0.01 at low w
+import time as _time
+t0 = _time.time()
+frequency.response(p6, [1.0], [0.2], dt=0.01, settle_periods=2, fit_periods=3)
+_t_fine = _time.time() - t0
+t0 = _time.time()
+frequency.response(p6, [1.0], [0.2], dt=None, settle_periods=2, fit_periods=3)
+_t_auto = _time.time() - t0
+check("auto-dt is faster at low w",
+      _t_auto < _t_fine,
+      f"fine {1000*_t_fine:.0f} ms vs auto {1000*_t_auto:.0f} ms")
+
+# ======================================================================
+# 7. source-mode validation: a controller loop is rejected cleanly
+# ======================================================================
+print("7. a controller loop is rejected")
 from cme452 import PID
 bad = ClosedLoop(plant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0)
 try:
@@ -175,5 +205,5 @@ except cme452.ModelError:
     check("rejects nonpositive omegas", True)
 
 print()
-print("ALL FREQUENCY TESTS PASSED (6 checks)")
+print("ALL FREQUENCY TESTS PASSED (7 checks)")
 sys.exit(0)
