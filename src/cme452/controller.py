@@ -26,7 +26,10 @@ Design notes
   setpoint therefore produces no derivative spike ("derivative kick").
 * With umin/umax given, the output is clamped and the I term stops
   accumulating while the output is saturated (conditional integration --
-  the simplest form of anti-windup).
+  the simplest form of anti-windup).  Set antiwindup=False to disable
+  this and watch classical windup: the I term keeps growing while the
+  output is pinned, so the controller keeps demanding a saturated move
+  long after the setpoint has been reached.
 * reset() clears all internal memory. ClosedLoop calls it automatically
   at the start of every run_simulation, so re-running a simulation can
   never leak an old I term into the new one.
@@ -38,7 +41,8 @@ import numpy as np
 class PID:
     """Discrete PI(D) controller. See the module docstring for the law."""
 
-    def __init__(self, Kc, tauI=None, tauD=None, umin=None, umax=None):
+    def __init__(self, Kc, tauI=None, tauD=None, umin=None, umax=None,
+                 antiwindup=True):
         Kc = float(Kc)
         if not np.isfinite(Kc) or Kc == 0.0:
             raise ValueError(f"Kc must be a nonzero finite number; you gave {Kc}.")
@@ -54,6 +58,7 @@ class PID:
         self.tauD = float(tauD) if tauD is not None else None
         self.umin = None if umin is None else float(umin)
         self.umax = None if umax is None else float(umax)
+        self.antiwindup = bool(antiwindup)
         self.reset()
 
     # ------------------------------------------------------------------
@@ -109,12 +114,17 @@ class PID:
         if self.tauD is not None:
             u -= self.Kc * self.tauD * dydt
 
-        # saturation with conditional integration (simple anti-windup):
-        # while the output is clamped, undo the I increment
+        # saturation; with anti-windup (conditional integration), the I
+        # increment is undone while the output is clamped, so the I term
+        # cannot grow while the move is pinned
         if self.umax is not None and u > self.umax:
-            u, I = self.umax, self._I
+            u = self.umax
+            if self.antiwindup:
+                I = self._I
         elif self.umin is not None and u < self.umin:
-            u, I = self.umin, self._I
+            u = self.umin
+            if self.antiwindup:
+                I = self._I
 
         self._I, self._t, self._y, self._e = I, t, y, e
         return float(u)
@@ -129,4 +139,6 @@ class PID:
             s += f", umin={self.umin:g}"
         if self.umax is not None:
             s += f", umax={self.umax:g}"
+        if not self.antiwindup:
+            s += ", antiwindup=False"
         return s + ")"

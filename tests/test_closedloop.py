@@ -311,6 +311,29 @@ except cme452.ModelError as e:
     assert "initial conditions" in str(e), str(e)
 print("31 OK  process-IC error message with valve present")
 
+# 32. antiwindup flag: ON, the I term does not grow while saturated, so
+#     the output frees up as soon as the error reverses; OFF, it stays
+#     pinned at the limit for a long unwinding tail
+def _stuck_steps(aw):
+    pid = PID(1.0, 1.0, umin=0.0, umax=1.0, antiwindup=aw)
+    t = 0.0
+    for _ in range(20):              # big positive error -> saturated
+        t += 0.5
+        pid.update(t, 0.0, 10.0)
+    n = 0
+    for _ in range(500):             # error reverses; count steps at limit
+        t += 0.5
+        n += 1
+        if pid.update(t, 1.0, 0.0) < 0.5:
+            break
+    return n
+
+with_aw, without_aw = _stuck_steps(True), _stuck_steps(False)
+assert with_aw <= 2, with_aw
+assert without_aw > 20, without_aw
+print("32 OK  antiwindup flag: pinned %d steps (on) vs %d (off)"
+      % (with_aw, without_aw))
+
 print()
-print("ALL TESTS PASSED (31 checks)")
+print("ALL TESTS PASSED (32 checks)")
 raise SystemExit(0)
