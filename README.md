@@ -25,6 +25,7 @@ block diagrams in class.
 | `PID`         | Discrete PI(D) controller: fixed error sign, derivative on the measurement, optional saturation and anti-windup. |
 | `ClosedLoop`  | Closes a `PID` around a `System`. One argument per block in the diagram. |
 | `stability`   | Eigenvalue analysis: plant Jacobian at an operating point, and the Jacobian of the loop's discrete one-step map. |
+| `frequency`   | Bode / frequency analysis by the sine test: `response`, `bode`, `margins` on a `source=` open loop. |
 | `plot_results`| Stacked time-series panels: one argument == one panel. |
 
 ## Installation
@@ -266,6 +267,44 @@ plant.run_simulation(t_end=5, IC=[0.0])
 # sine in, first-order lag out — the raw "sine test" you would run by hand
 ```
 
+## Frequency analysis (Bode)
+
+The Bode diagram is the lab's **sine test**, run by simulation: drive an
+open-loop loop (`source=`) with `A·sin(w t)` at each frequency `w`, let the
+transient settle, and measure the amplitude ratio and phase of the *sensored*
+output. No Laplace transform, no transfer-function machinery — the same
+`System`/RK4 the rest of the package uses.
+
+```python
+from cme452 import ClosedLoop, frequency
+
+# the open chain to measure: source -> valve -> process -> sensor
+plant = ClosedLoop(model, params, measure=0, source=(1.0, 1.0),
+                   valve=(Kv, tauv), valve0=0.0, sensor=Km)
+
+# sweep a log-spaced grid of frequencies (rad/time)
+w    = np.logspace(-1, 1.5, 20)
+fig  = frequency.bode(plant, IC_ss=[x_ss], omegas=w)
+# -> Bode plot: |G| in dB (top) and phase in deg (bottom)
+
+# or just the numbers:
+w_, gain, phase = frequency.response(plant, IC_ss=[x_ss], omegas=w)
+
+# gain / phase margins (crossings of |G| = 1 and phase = -180 deg):
+gm, pm, w_gc, w_pc = frequency.margins(gain, phase, w)
+```
+
+* `response` measures the chain the **controller would actually see** —
+  process + valve + sensor — because it reuses the loop's `valve=` / `sensor=`
+  / `measure=`. The Bode plot therefore shows the open-loop gain the loop
+  closes with, not the bare plant.
+* The operating point `IC_ss` is passed in (the same one you use for
+  `stability.jacobian`): the fit removes the DC level, so it measures the
+  AC response about that point.
+* `bode` returns `(omegas, gain, phase, fig)`; `response` returns the three
+  arrays. `dt` keeps the usual `0.01` default — keep `w·dt` well below ~0.5
+  at the top of your grid, or the ZOH-sampled sine is under-resolved.
+
 ## Stability analysis (eigenvalues)
 
 Two objects, matching the two time domains:
@@ -334,6 +373,7 @@ takes the time vector explicitly.
 ```bash
 PYTHONPATH=src python tests/test_closedloop.py    # 41 checks
 PYTHONPATH=src python tests/test_stability.py     # 9 checks
+PYTHONPATH=src python tests/test_frequency.py     # 6 checks
 ```
 
 The first: P/PI behavior, anti-windup on/off, derivative kick,
@@ -342,7 +382,10 @@ sensor-gain invariance, measurement delay, feedforward, and the open-loop
 `source=` drive (the manipulated variable prescribed instead of a
 controller).  The second: Jacobians against hand-computed eigenvalues,
 predicted vs simulated ringing period, the one-step map against its exact
-ZOH discretization, and that linearizing disturbs nothing.
+ZOH discretization, and that linearizing disturbs nothing.  The third:
+the sine-test Bode response against analytic 1st- and 2nd-order transfer
+functions, the valve+sensor chain, the 2nd-order resonance peak,
+margin crossings on synthetic curves, and headless `bode` rendering.
 
 ## Project layout
 
@@ -350,10 +393,12 @@ ZOH discretization, and that linearizing disturbs nothing.
 src/cme452/
     core.py        System: RK4 harness, probing, values, decimation, progress
     controller.py  PID
-    loop.py        ClosedLoop: controller scheduling, ZOH, valve, sensor + delay
+    loop.py        ClosedLoop: controller scheduling, ZOH, valve, sensor + delay, source=
     stability.py   jacobian, one-step map, eigenvalue plots
+    frequency.py   sine-test Bode: response, bode, margins
     plotting.py    plot_results
 tests/
     test_closedloop.py
     test_stability.py
+    test_frequency.py
 ```
