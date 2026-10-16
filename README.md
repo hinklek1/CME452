@@ -24,6 +24,7 @@ block diagrams in class.
 | `System`      | Open-loop ODE harness: fixed-step RK4, model checking, extra outputs, plotting. |
 | `PID`         | Discrete PI(D) controller: fixed error sign, derivative on the measurement, optional saturation and anti-windup. |
 | `ClosedLoop`  | Closes a `PID` around a `System`. One argument per block in the diagram. |
+| `stability`   | Eigenvalue analysis: plant Jacobian at an operating point, and the Jacobian of the loop's discrete one-step map. |
 | `plot_results`| Stacked time-series panels: one argument == one panel. |
 
 ## Installation
@@ -190,6 +191,51 @@ Diverged runs usually don't raise — they return huge values, and only
 raise `ModelError` once a derivative goes non-finite. Guard with
 `np.all(np.isfinite(loop.x))` (or a magnitude threshold) before appending.
 
+## Stability analysis (eigenvalues)
+
+Two objects, matching the two time domains:
+
+* **Open loop** — the Jacobian of dx/dt at an operating point.  All
+  eigenvalues in the left half plane (Re < 0) is stable; a complex pair
+  with imaginary part `w` rings with period `2*pi/w`.
+* **Closed loop** — the loop is *discrete* (controller called once per
+  step, output held), so the honest object is the **one-step map**:
+  full state in, one integration step, full state out.  The state is the
+  augmented vector `[valve?, process states..., controller memory...]`
+  (`I` and `e_prev` for PI/PID, `y_prev` for PD/PID).  The test is
+  `|lambda| < 1`, and a complex pair with argument `theta` rings with
+  period `2*pi/theta` steps.
+
+```python
+from cme452 import System, ClosedLoop, PID, stability
+
+# open loop: linearize the plant at an operating point
+J  = stability.jacobian(sys, x_op=[340.0])
+ev = stability.eigenvalues(J)                    # np.linalg.eigvals
+stability.eigenvalue_plot(ev)                     # Re = 0 line
+
+# closed loop: the one-step map at the end of a run
+loop.run_simulation(t_end=60, IC=[0.0])
+z_op = stability.augmented_state(loop)            # [q?, x..., I?, ...]
+J    = stability.closed_loop_jacobian(loop, t_op=loop.t[-1], z_op=z_op)
+ev   = stability.eigenvalues(J)
+stability.eigenvalue_plot(ev, discrete=True)      # unit circle
+```
+
+The natural sweep: rebuild the loop for each gain, run, linearize — and
+watch the eigenvalues cross the unit circle as Kc grows.
+`stability.one_step(loop, t_op, z)` is the nonlinear map itself (what the
+Jacobian linearizes); iterate `z + J @ (z - z_op)` by hand and compare.
+
+Two caveats, both worth showing students:
+
+* Linearization is **local** — it says nothing about trajectories far
+  from the operating point.
+* A sensor **delay** makes the true loop infinite-dimensional (the state
+  would be the whole measurement history), so `closed_loop_jacobian`
+  refuses `sensor=(Km, delay)` loops and tells you to treat the delay as
+  extra phase instead.
+
 ## plot_results
 
 One rule: **one argument == one panel.**
@@ -211,12 +257,16 @@ takes the time vector explicitly.
 ## Tests
 
 ```bash
-PYTHONPATH=src python tests/test_closedloop.py
+PYTHONPATH=src python tests/test_closedloop.py    # 35 checks
+PYTHONPATH=src python tests/test_stability.py     # 9 checks
 ```
 
-35 checks: P/PI behavior, anti-windup on/off, derivative kick, zero-order-hold
-timing, valve-ODE accuracy against the analytic solution, sensor-gain
-invariance, measurement delay, and error messages.
+The first: P/PI behavior, anti-windup on/off, derivative kick,
+zero-order-hold timing, valve-ODE accuracy against the analytic solution,
+sensor-gain invariance, measurement delay, and error messages.  The
+second: Jacobians against hand-computed eigenvalues, predicted vs
+simulated ringing period, the one-step map against its exact ZOH
+discretization, and that linearizing disturbs nothing.
 
 ## Project layout
 
@@ -225,7 +275,9 @@ src/cme452/
     core.py        System: RK4 harness, probing, values, decimation, progress
     controller.py  PID
     loop.py        ClosedLoop: controller scheduling, ZOH, valve, sensor + delay
+    stability.py   jacobian, one-step map, eigenvalue plots
     plotting.py    plot_results
 tests/
     test_closedloop.py
+    test_stability.py
 ```

@@ -256,6 +256,11 @@ class ClosedLoop(System):
                 "measure must be a state index (measure=0 measures the "
                 "first state) or a function of the state: measure(x) -> y."
             )
+        elif self._valve is not None:
+            # the wrapper prepends the valve state; a function measure is
+            # documented to read the PROCESS state, so hand it x[1:]
+            # (exactly what the index path does with its +1 offset)
+            measure = (lambda x, f=measure: f(x[1:]))
         self.measure = measure
 
         self.y_sp = y_sp
