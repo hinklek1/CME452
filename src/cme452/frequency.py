@@ -43,7 +43,14 @@ in-phase (a) and quadrature (b) components:
     phase = atan2(b, a)          (radians, +90 deg max lead)
 
 Because the fit divides out the drive amplitude, the result is the
-small-signal (linearized) frequency response: it does not depend on A.
+small-signal (linearized) frequency response -- provided the plant is
+locally linear at IC_ss over the drive excursion. Nothing here checks
+that: for a strongly nonlinear plant, or if IC_ss is not a true steady
+state, the gain/phase are the fundamental of the (possibly distorted)
+steady-state output, not the linear gain, and they WILL depend on A.
+This module does not linearize (no Jacobian, no operating-point argument);
+it MEASURES the steady-state sinusoid, which equals the linearized
+response the same way a lab sine test does.
 
 SETTLE / FIT
 ------------
@@ -52,6 +59,8 @@ from IC_ss decays during the settle window and is thrown away; the fit
 uses only the last fit_periods periods. Both are explicit arguments so a
 student trades accuracy for speed and sees the transient they discard.
 """
+
+import warnings
 
 import numpy as np
 import matplotlib
@@ -113,19 +122,27 @@ def _fit_one(plant, IC_ss, w, settle_periods, fit_periods, dt,
     if settle_time is None:
         settle_time = max(1, int(round(settle_periods))) * (2.0 * np.pi / w)
     settle_time = float(settle_time)
-    fit_time = fit * (2.0 * np.pi / w)
-    t_end = settle_time + fit_time
-    # n_fit in POINTS for the fit window: fit periods worth of samples
-    n_fit = max(2, int(round(fit_time / h)))
+    t_end = settle_time + fit * (2.0 * np.pi / w)
+    # n_fit in POINTS for the fit window: `fit` whole periods of the sine,
+    # counted in samples. The window must hold a WHOLE number of periods so
+    # that <sin> and <cos> over it are (nearly) zero and the in-phase /
+    # quadrature correlation is unbiased.
+    n_fit = max(2, int(round(fit * (2.0 * np.pi / w) / h)))
     # re-point the source at this frequency (unit amplitude internally;
     # the fit divides it out, so A does not change the answer)
     plant.source = (w, 1.0)
     # n_out=None keeps EVERY integration step: the fit correlates the
     # output with sin/cos on a dense grid, so the output must not be
     # decimated (decimating to ~n points would alias the w-sine).
-    t, x, v = plant.run_simulation(
-        t_end=t_end, IC=IC_ss, dt=h, n_out=None, progress=False
-    )
+    # run_simulation may nudge h so the run lands exactly on t_end (a
+    # "dt adjusted" warning); that nudged step is what we integrate with,
+    # so the sine is sampled on the SAME grid as the output. Suppress the
+    # warning here -- it is expected for a scan, not an error.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        t, x, v = plant.run_simulation(
+            t_end=t_end, IC=IC_ss, dt=h, n_out=None, progress=False
+        )
     # measured output on the output grid, in SENSOR units (the chain the
     # controller closes on: process -> valve -> sensor). x_full is every
     # integration step of the PROCESS state; for a valve loop, measure
@@ -142,9 +159,16 @@ def _fit_one(plant, IC_ss, w, settle_periods, fit_periods, dt,
         y[j], _ = plant._transduce(y_raw, t[j] if t is not None else 0.0)
     y = y.ravel()
 
-    # fit over the LAST `fit` periods only (the settle window is dropped)
-    t_f = t[-n_fit:]
-    y_f = y[-n_fit:]
+    # Fit over the LAST `fit` periods only (the settle window is dropped).
+    # Drop the final sample: t_full[-1] sits at t_end, one step past the
+    # last integration grid point (n_steps-1)*h, so the sine evaluated there
+    # is one step out of phase with the held input. The window
+    # [t[-n_fit-1], ..., t[-2]] spans n_fit samples = `fit` whole periods,
+    # so <sin> and <cos> over it are zero to roundoff and the correlation
+    # below is unbiased (the original code's [-n_fit:] included that
+    # off-grid sample, adding a small systematic phase bias).
+    t_f = t[-n_fit - 1:-1]
+    y_f = y[-n_fit - 1:-1]
 
     # Remove the DC level (the operating point) before correlating: the fit
     # measures the AC response to the AC drive, not the steady value they
@@ -206,12 +230,28 @@ def response(plant, IC_ss, omegas, settle_periods=2.0, fit_periods=3.0,
         Upper bound on the per-frequency integration step (default 0.05).
         Keeps the step fine enough to resolve fast transients even at low
         w, while still letting low frequencies use a coarser, faster step.
+        Set it to ~0.1 x the fastest process/valve time constant so the
+        actuator and fast process dynamics stay resolved even at low w.
 
     Returns
     -------
     (omegas, gain, phase)
         Arrays, in the order of `omegas`. gain is the amplitude ratio
         (|G|), phase is the phase in RADIANS (positive = lead).
+
+    Notes
+    -----
+    The sine test measures the steady-state sinusoidal response about
+    `IC_ss`. It equals the linearized (small-signal) frequency response
+    -- what `stability.jacobian` would give you -- only if the plant is
+    locally linear at `IC_ss` over the drive excursion. Nothing here
+    checks that: if the plant is strongly nonlinear, or `IC_ss` is not a
+    true steady state, the reported gain/phase are the fundamental of the
+    (possibly distorted) steady-state output, not the linear gain.
+
+    The loop's `source` is re-pointed at each frequency and restored to
+    its original value when the scan finishes, so a later
+    `plant.run_simulation` is unaffected by the scan.
     """
     _validate_source_loop(plant)
     IC_ss = np.atleast_1d(np.asarray(IC_ss, dtype=float)).ravel()
@@ -228,11 +268,15 @@ def response(plant, IC_ss, omegas, settle_periods=2.0, fit_periods=3.0,
         raise ModelError("settle_time must be positive when given.")
     gain = np.empty_like(omegas)
     phase = np.empty_like(omegas)
-    for k, w in enumerate(omegas):
-        gain[k], phase[k] = _fit_one(
-            plant, IC_ss, float(w), settle_periods, fit_periods, dt,
-            settle_time=settle_time, dt_max=dt_max,
-        )
+    saved_source = plant._source      # _fit_one re-points it per frequency
+    try:
+        for k, w in enumerate(omegas):
+            gain[k], phase[k] = _fit_one(
+                plant, IC_ss, float(w), settle_periods, fit_periods, dt,
+                settle_time=settle_time, dt_max=dt_max,
+            )
+    finally:
+        plant._source = saved_source   # leave the loop as the caller built it
     return omegas, gain, phase
 
 
@@ -282,7 +326,9 @@ def margins(gain, phase, omegas):
     Parameters
     ----------
     gain, phase, omegas
-        The arrays from response() (any order, but paired by index).
+        The arrays from response() (paired by index). `omegas` must be
+        strictly increasing in w -- the crossing search walks the grid
+        forward, so a non-monotonic grid silently reports no crossings.
         phase is in RADIANS.
 
     Returns
@@ -307,8 +353,19 @@ def margins(gain, phase, omegas):
             "gain, phase, and omegas must have the same shape "
             f"({gain.shape}, {phase.shape}, {omegas.shape})."
         )
+    if omegas.size < 2:
+        raise ModelError(
+            "margins needs at least 2 frequencies to find a crossing "
+            f"(got {omegas.size})."
+        )
     if np.any(omegas <= 0):
         raise ModelError("omegas must be positive.")
+    if np.any(np.diff(omegas) <= 0.0):
+        raise ModelError(
+            "omegas must be strictly increasing; the crossing search "
+            "walks the grid forward, so a non-monotonic grid is "
+            f"meaningless. Sort it first (got {omegas.tolist()})."
+        )
 
     # |G| = 1 crossover (gain crossing): where log10(gain) crosses 0
     w_gc = _crossing(omegas, np.log10(gain), 0.0)

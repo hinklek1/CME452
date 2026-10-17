@@ -30,8 +30,8 @@ def plant(t, x, p, inputs):
 # The open chain to measure: source -> (valve) -> process -> sensor.
 # Built with source= (no controller). A placeholder (1.0, 1.0) is fine;
 # frequency.response reassigns loop.source per frequency.
-def make_plant(valve=None, valve0=None, sensor=1.0):
-    return ClosedLoop(plant, {}, measure=0, source=(1.0, 1.0),
+def make_plant(valve=None, valve0=None, sensor=1.0, source=(1.0, 1.0)):
+    return ClosedLoop(plant, {}, measure=0, source=source,
                       valve=valve, valve0=valve0, sensor=sensor)
 
 
@@ -157,11 +157,16 @@ print("6. auto-dt picks a safe per-frequency step")
 p6 = make_plant(valve=(1.0, 0.5), valve0=0.0, sensor=1.0)
 w6 = np.logspace(-1, 1, 20)
 # auto-dt (dt=None) must match an explicit fine dt (dt=0.01) to within the
-# expected tolerance -- same math, just different step sizes
-_, ga, pa = frequency.response(p6, [1.0], w6, dt=0.01,
-                               settle_periods=3, fit_periods=5)
-_, g_auto, p_auto = frequency.response(p6, [1.0], w6, dt=None,
-                                       settle_periods=3, fit_periods=5)
+# expected tolerance -- same math, just different step sizes. Settle by a
+# fixed PROCESS duration (settle_time), not by sine periods: at high w the
+# process (tau=1) and valve (tau=0.5) need ~5 time units to settle, while
+# 3 periods of w=10 is only 1.9 units, so period-based settling under-
+# settles and the fit window is still ringing. A fixed duration settles
+# the transient at every w, so the only difference left is the step size.
+_, ga, pa = frequency.response(p6, [1.0], w6, dt=0.01, settle_time=6.0,
+                               fit_periods=5)
+_, g_auto, p_auto = frequency.response(p6, [1.0], w6, dt=None, settle_time=6.0,
+                                       fit_periods=5)
 rel = float(np.max(np.abs(g_auto - ga) / ga))
 absph = float(np.max(np.abs(p_auto - pa)))
 check("auto-dt matches fine-dt",
@@ -180,9 +185,69 @@ check("auto-dt is faster at low w",
       f"fine {1000*_t_fine:.0f} ms vs auto {1000*_t_auto:.0f} ms")
 
 # ======================================================================
-# 7. source-mode validation: a controller loop is rejected cleanly
+# 7. the fit window is a whole number of sine periods on the grid: a
+#    stable 2nd-order process matches its analytic G(s) tightly (this is
+#    the regression for the old window, which included the off-grid final
+#    sample and biased the sin/cos correlation by a small w-dependent amount)
 # ======================================================================
-print("7. a controller loop is rejected")
+print("7. fit window: 2nd-order matches analytic G(s)")
+wn, zeta = 1.0, 0.3
+def plant2b(t, x, p, inputs):
+    return [x[1], inputs[0](t) - 2.0 * zeta * wn * x[1] - wn**2 * x[0]]
+p7 = ClosedLoop(plant2b, {}, measure=0, source=(1.0, 1.0))
+w7 = np.array([0.3, 0.7, 1.0, 1.5, 2.5])
+w7_, g7, ph7 = frequency.response(p7, [0.0, 0.0], w7, dt=0.01,
+                                  settle_periods=10, fit_periods=6)
+s7 = 1j * w7
+G7 = wn**2 / (s7**2 + 2.0 * zeta * wn * s7 + wn**2)
+rel_g7 = float(np.max(np.abs(g7 - np.abs(G7)) / np.abs(G7)))
+abs_p7 = float(np.max(np.abs(ph7 - np.angle(G7))))
+check("2nd-order gain vs analytic", rel_g7 < 2e-3,
+      f"max rel gain err {rel_g7:.1e}")
+check("2nd-order phase vs analytic", abs_p7 < 2e-2,
+      f"max phase err {np.degrees(abs_p7):.2f} deg")
+
+# ======================================================================
+# 8. response() restores plant.source: a scan must not leave the loop
+#    driven at the last scanned frequency
+# ======================================================================
+print("8. response restores plant.source")
+p8 = make_plant(source=(2.0, 3.0))   # w=2, A=3
+frequency.response(p8, [1.0], [0.5, 1.0], dt=0.01, settle_periods=2,
+                   fit_periods=3)
+# the original drive is 3*sin(2 t); at t=0.3 that is 3*sin(0.6)=1.6939
+check("plant.source restored to the original drive",
+      abs(p8.source(0.3) - 3.0 * np.sin(0.6)) < 1e-9,
+      f"p.source(0.3)={p8.source(0.3):.4f}, expected {3.0*np.sin(0.6):.4f}")
+
+# ======================================================================
+# 9. margins validates its grid; source= rejects arrays
+# ======================================================================
+print("9. margins grid validation + source= array rejection")
+try:
+    frequency.margins(np.array([0.5]), np.array([0.0]), np.array([1.0]))
+    check("margins single-point error", False)
+except cme452.ModelError as e:
+    check("margins single-point error", "at least 2" in str(e))
+try:
+    frequency.margins(np.array([1.0, 0.5, 2.0]), np.array([0.0, 0.0, 0.0]),
+                      np.array([1.0, 0.5, 2.0]))
+    check("margins non-monotonic error", False)
+except cme452.ModelError as e:
+    check("margins non-monotonic error", "strictly increasing" in str(e))
+try:
+    ClosedLoop(plant, {}, measure=0, source=np.array([1.0, 1.0]))
+    check("source= rejects ndarray", False)
+except cme452.ModelError as e:
+    check("source= rejects ndarray", "array" in str(e))
+# a list/tuple is still read as (w, A)
+p9 = make_plant(source=[1.0, 2.0])
+check("source= list/tuple still works", abs(p9.source(0.3) - 2.0 * np.sin(0.3)) < 1e-9)
+
+# ======================================================================
+# 10. source-mode validation: a controller loop is rejected cleanly
+# ======================================================================
+print("10. a controller loop is rejected")
 from cme452 import PID
 bad = ClosedLoop(plant, {}, PID(1.0, 4.0), measure=0, y_sp=1.0)
 try:
@@ -205,5 +270,5 @@ except cme452.ModelError:
     check("rejects nonpositive omegas", True)
 
 print()
-print("ALL FREQUENCY TESTS PASSED (7 checks)")
+print("ALL FREQUENCY TESTS PASSED (10 checks)")
 sys.exit(0)

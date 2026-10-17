@@ -388,7 +388,11 @@ class ClosedLoop(System):
             self._source = (lambda t, f=source: float(f(t)))
             return
         try:
-            if _is_listlike(source):
+            # Only a list/tuple is read as (w[, A]): a bare number is a
+            # frequency, and an ndarray is rejected so a state vector or
+            # parameter array passed by mistake is not silently treated
+            # as a (w, A) pair.
+            if isinstance(source, (list, tuple)):
                 if len(source) == 1:
                     w, A = float(source[0]), 1.0
                 elif len(source) == 2:

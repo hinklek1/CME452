@@ -302,14 +302,33 @@ gm, pm, w_gc, w_pc = frequency.margins(gain, phase, w)
   `stability.jacobian`): the fit removes the DC level, so it measures the
   AC response about that point.
 * `bode` returns `(omegas, gain, phase, fig)`; `response` returns the three
-  arrays.
+  arrays. `response` re-points the loop's `source` at each frequency and
+  restores it when the scan finishes, so a later `plant.run_simulation` is
+  unaffected by the scan.
 * **It's fast by default.** `dt` defaults to `None` ("auto"): each frequency
   uses the largest safe step, `min(dt_max, 0.2/w)`, so low frequencies run
   with a coarse (fast) step and high frequencies stay resolved. A 100-point
   scan of a 1st-order + valve chain takes ~8 s; 40 points take ~3 s. Pass
   `dt=0.01` to force a fine, slower step at every `w`, or `settle_time=6.0`
   to settle by a fixed process duration (≈6× the slowest time constant)
-  instead of `settle_periods` sine periods.
+  instead of `settle_periods` sine periods. Use `settle_time` whenever the
+  process is slow relative to the sine period (high `w`): settling by periods
+  can under-settle the transient, and a ringing fit window biases the phase.
+* **Settling is on you.** The fit throws away the first `settle_periods` (or
+  `settle_time`) and measures the sinusoid in the last `fit_periods`. That
+  only equals the *steady-state* response if the transient from `IC_ss` has
+  actually died by then. A plant with a pole near the origin (an integrator,
+  a very slow tank) has a transient that decays on a process timescale, not a
+  sine period — at high `w` a few settle *periods* can be far shorter than one
+  process time constant, and the fit will report a ringing, not a steady,
+  sinusoid. Settle by `settle_time` ≈ 5–10× the slowest process time constant.
+* **Local linearity is assumed, not checked.** The measured gain/phase equal
+  the linearized (Jacobian) frequency response only if the plant is locally
+  linear at `IC_ss` over the drive excursion. For a strongly nonlinear plant,
+  or if `IC_ss` is not a true steady state, the numbers are the fundamental of
+  the (possibly distorted) steady-state output — not the linear gain — and they
+  will depend on the drive amplitude. (An amplitude-invariance / harmonic-
+  content diagnostic is on the plan for a future version, not this one.)
 
 ## Stability analysis (eigenvalues)
 
