@@ -181,8 +181,8 @@ class ClosedLoop(System):
     module docstring for the full argument-by-argument description; each
     argument is one block of the loop diagram."""
 
-    def __init__(self, model, params, controller=None, measure=0,
-                 y_sp=0.0, inputs=(), valve=None, valve0=None, sensor=1.0,
+    def __init__(self, model, params, inputs=(), controller=None, measure=0,
+                 y_sp=0.0, valve=None, valve0=0, sensor=1.0,
                  feedforward=None, source=None):
         # ---- valve (actuator) ---------------------------------------
         self._valve = None
